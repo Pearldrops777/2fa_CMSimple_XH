@@ -6,9 +6,10 @@ After a correct CMSimple_XH admin password, the site asks for a 6-digit code fro
 
 - **First login after installation:** A QR code and a setup key are shown. Scan the code in Google Authenticator (or type the key), then enter the 6-digit code to finish setup.
 - **Every subsequent login:** Password login always requires a fresh 6-digit code.
-- **Replay & brute-force protection:** Codes can be used only once. Five wrong codes lock the prompt for 15 minutes.
+- **Shared replay & brute-force protection:** Codes can be used only once. Five wrong codes across either the login prompt or the backend panel lock verification for 15 minutes.
 - **One-time backup codes:** When setup finishes, 10 one-time backup codes are shown once. Save them (print them or write them down). Each code works once in place of the app code—for example, if you lose your phone. A used code is immediately removed. Only the hashes of the codes are stored on the server.
 - **Backend management (`Plugins -> 2fa`):** View the remaining backup code count, generate a fresh set of 10 backup codes, or reset the 2FA secret key directly from the CMSimple_XH admin panel.
+- **Multi-language support:** Includes built-in English (`en`), Dutch (`nl`), and German (`de`) language files editable via **Plugins -> 2fa -> Language**.
 - **Transparent to visitors:** Visitors who are not logged in see no change.
 
 The plugin does not modify any CMSimple_XH core files, so CMSimple_XH updates will not remove it.
@@ -30,12 +31,18 @@ plugins/
     index.php                              # Login gate, TOTP & backup code verification (required)
     admin.php                              # Backend panel under Plugins -> 2fa (required)
     version.nfo                            # CMSimple_XH update checker metadata
+    LICENSE                                # GNU General Public License v3
     README.md                              # Documentation (optional)
+    languages/
+      en.php                               # English language strings
+      nl.php                               # Dutch language strings
+      de.php                               # German language strings
     js/
       qrcode.js                            # QR code library, MIT license (required)
       QRCODE-GENERATOR-LICENSE-README.md   # License notice (keep it)
     data/                                  # Created/populated by the server on first use
-      .htaccess                            # Blocks direct web access (required)
+      .htaccess                            # Blocks direct web access on Apache (required)
+      index.php                            # Blocks directory indexing on Nginx/Caddy
       twofa.php                            # TOTP secret, backup code hashes & rate-limit state
                                            # (created automatically; never publish or copy it)
 ```
@@ -46,8 +53,10 @@ plugins/
    - `plugins/2fa/index.php`
    - `plugins/2fa/admin.php`
    - `plugins/2fa/version.nfo`
+   - `plugins/2fa/LICENSE`
+   - `plugins/2fa/languages/en.php`, `nl.php`, and `de.php`
    - `plugins/2fa/js/qrcode.js` and `QRCODE-GENERATOR-LICENSE-README.md`
-   - `plugins/2fa/data/.htaccess`
+   - `plugins/2fa/data/.htaccess` and `plugins/2fa/data/index.php`
    *(Do not copy it to an Apache reverse proxy if your site uses one. The plugin must run on the server executing CMSimple_XH PHP.)*
 2. Set the proper file ownership and permissions (see [Permissions](#permissions) below).
 3. Log in to CMSimple_XH with your admin password. The setup screen appears. Scan the QR code with Google Authenticator and enter the 6-digit code.
@@ -62,33 +71,42 @@ plugins/
 
 ## Permissions
 
-Replace `www-data` with the user that runs PHP on your server if different (check via `phpinfo()` or the owner of existing CMSimple_XH folders), and replace `/path/to/plugins` with your actual installation path.
+Replace `www-data` with the user that runs PHP on your server if different (check via `phpinfo()` or the owner of existing CMSimple_XH folders), and adjust `/var/www/html/plugins` if your installation path differs.
 
 | Item | Owner | Mode |
 | :--- | :--- | :--- |
 | `plugins/2fa/` | deploy user or `www-data` | `755` |
-| `plugins/2fa/index.php`, `admin.php`, `version.nfo` | deploy user or `www-data` | `644` |
+| `plugins/2fa/*.php`, `version.nfo`, `LICENSE`, `README.md` | deploy user or `www-data` | `644` |
 | `plugins/2fa/js/` | deploy user or `www-data` | `755` |
 | `plugins/2fa/js/qrcode.js` | deploy user or `www-data` | `644` |
+| `plugins/2fa/languages/` | `www-data` | `755` |
+| `plugins/2fa/languages/*.php` | `www-data` | `644` |
 | `plugins/2fa/data/` | `www-data` | `700` |
-| `plugins/2fa/data/.htaccess` | `www-data` | `644` |
+| `plugins/2fa/data/.htaccess`, `plugins/2fa/data/index.php` | `www-data` | `644` |
 | `plugins/2fa/data/twofa.php` *(created by PHP)* | `www-data` | `600` |
 
 Run as `root` or with `sudo`:
 
 ```bash
-cd /path/to/plugins
+cd /var/www/html/plugins
 sudo chown -R www-data:www-data 2fa
 sudo find 2fa -type d -exec chmod 755 {} +
 sudo find 2fa -type f -exec chmod 644 {} +
-sudo chown www-data:www-data 2fa/data
+
+# Make languages/ and its files writable by www-data for the built-in language editor:
+sudo chown -R www-data:www-data 2fa/languages
+sudo chmod 755 2fa/languages
+sudo chmod 644 2fa/languages/*.php
+
+# Lock down data/ so only www-data can read or write the secret:
+sudo chown -R www-data:www-data 2fa/data
 sudo chmod 700 2fa/data
 
 # After the first successful setup:
 sudo chmod 600 2fa/data/twofa.php
 ```
 
-**Why:** PHP must be able to write to `data/` to save the secret and rate-limit state. Nothing outside `data/` requires write access. Never use `777`.
+**Why:** PHP must be able to write to `data/` to save the secret and rate-limit state, and to `languages/` if you edit translations via **Plugins -> 2fa -> Language**. Nothing outside `data/` and `languages/` requires write access by `www-data`. Never use `777`.
 
 ## Managing & Resetting 2FA
 
@@ -104,10 +122,12 @@ Google Authenticator supports account transfers (**Menu -> Transfer accounts -> 
 
 - **"Could not save the two-factor data. Check that plugins/2fa/data is writable."**
   The code was accepted, but PHP could not write `data/twofa.php`. Verify the owner and permissions of `plugins/2fa/data` (see [Permissions](#permissions)) and check your web server error log (`/var/log/apache2/error.log` or `/var/log/httpd/error_log`).
+- **Cannot save changes in Plugins -> 2fa -> Language**
+  Ensure `/var/www/html/plugins/2fa/languages` and the `.php` files inside it are owned by `www-data:www-data` with modes `755` and `644`.
 - **The QR code area is empty or shows "QR code not shown"**
-  `js/qrcode.js` is missing or unreadable by the web-server user. Re-upload the `js/` folder and verify its `644` file permissions.
+  `js/qrcode.js` is missing, unreadable by the web-server user, or blocked by web server rules. Re-upload the `js/` folder and verify its `644` file permissions.
 - **"Too many failed attempts"**
-  Five wrong codes locked the prompt for 15 minutes. Wait 15 minutes and try again with a fresh code.
+  Five wrong codes locked verification for 15 minutes. Wait 15 minutes and try again with a fresh code.
 - **The code is always refused**
   Ensure your phone's clock is set to automatic network time synchronization. TOTP depends on accurate UTC time.
 - **A backup code is refused**
@@ -115,7 +135,7 @@ Google Authenticator supports account transfers (**Menu -> Transfer accounts -> 
 - **Locked out completely (lost phone, wrong key, and lost backup codes)**
   Connect via FTP, SFTP, or SSH and delete:
   ```text
-  plugins/2fa/data/twofa.php
+  /var/www/html/plugins/2fa/data/twofa.php
   ```
   The next password login will restart setup with a fresh QR code and 10 new backup codes. Have your phone ready before deleting the file.
 - **Nothing happens; login succeeds without a code prompt**
@@ -141,10 +161,16 @@ location ^~ /plugins/2fa/data/ {
 
 ## License
 
-- The plugin code (`index.php`, `admin.php`) is provided as-is, without warranty.
+- The plugin code (`index.php`, `admin.php`) is licensed under the **GNU General Public License v3 (GPLv3)** — see the `LICENSE` file for details.
 - `js/qrcode.js` is **qrcode-generator 1.5.2** by Kazuhiko Arase, licensed under the MIT License (see the file header and `js/QRCODE-GENERATOR-LICENSE-README.md`).
 
 ## Changelog
+
+### 1.0.5
+- Added multi-language support (`languages/en.php`, `languages/nl.php`, `languages/de.php`) editable via **Plugins -> 2fa -> Language**.
+- Shared the 5-attempt / 15-minute brute-force lockout across both the login challenge and the backend confirmation forms (`admin.php`).
+- Loaded `js/qrcode.js` via an external `<script src="...">` tag instead of inline script injection for browser caching and strict CSP compatibility.
+- Added `data/index.php` directory-listing guard and root `LICENSE` (GPLv3) file.
 
 ### 1.0.4
 - Added backend administration panel (`admin.php`) under **Plugins -> 2fa** to view remaining backup code count, regenerate backup codes, and reset the 2FA secret.
