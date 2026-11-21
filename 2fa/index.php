@@ -120,11 +120,87 @@ function twofa_qr_script(string $otpauth): string
 {
     $lib = (string) @file_get_contents(__DIR__ . DIRECTORY_SEPARATOR . 'js' . DIRECTORY_SEPARATOR . 'qrcode.js');
     if ($lib === '') {
-        return '';
+        return "document.getElementById('twofa-qr').textContent="
+            . "'QR code not shown: plugins/2fa/js/qrcode.js is missing or unreadable. Use the setup key below.';";
     }
     $uri = json_encode($otpauth, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
-    return $lib . "\n;(function(){var q=qrcode(0,'M');q.addData(" . $uri . ");q.make();"
-        . "document.getElementById('twofa-qr').innerHTML=q.createSvgTag({scalable:true,margin:2});})();";
+    $draw = "(function(){try{var q=qrcode(0,'M');q.addData(" . $uri . ");q.make();"
+        . "document.getElementById('twofa-qr').innerHTML=q.createSvgTag({scalable:true,margin:2});}"
+        . "catch(e){document.getElementById('twofa-qr').textContent='QR code error: '+e;}})();";
+    return $lib . "\n;" . $draw;
+}
+
+/**
+ * Creates 10 one-time backup codes. Only their hashes are stored in $data;
+ * the plain codes are returned so they can be shown to the admin once.
+ *
+ * @param array<string, mixed> $data
+ * @return list<string>
+ */
+function twofa_make_backup_codes(array &$data): array
+{
+    $codes = [];
+    $hashes = [];
+    for ($i = 0; $i < 10; $i++) {
+        $raw = bin2hex(random_bytes(5)); // 10 lowercase hex characters
+        $codes[] = substr($raw, 0, 5) . '-' . substr($raw, 5, 5);
+        $hashes[] = password_hash($raw, PASSWORD_DEFAULT);
+    }
+    $data['backup_hashes'] = $hashes;
+    return $codes;
+}
+
+/**
+ * Checks a backup code (dashes and case are ignored). A matching code is
+ * removed, so it works only once.
+ *
+ * @param array<string, mixed> $data
+ */
+function twofa_use_backup_code(array &$data, string $input): bool
+{
+    $raw = strtolower((string) preg_replace('/[^A-Za-z0-9]/', '', $input));
+    if (strlen($raw) !== 10 || empty($data['backup_hashes'])) {
+        return false;
+    }
+    foreach ($data['backup_hashes'] as $i => $hash) {
+        if (password_verify($raw, $hash)) {
+            unset($data['backup_hashes'][$i]);
+            $data['backup_hashes'] = array_values($data['backup_hashes']);
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Shows the backup codes once, right after setup. Exits.
+ */
+function twofa_show_new_codes(): void
+{
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['twofa_codes_saved'])) {
+        unset($_SESSION['twofa_new_codes']);
+        header('Location: ' . $_SERVER['REQUEST_URI'], true, 303);
+        exit;
+    }
+    $items = '';
+    foreach ($_SESSION['twofa_new_codes'] as $code) {
+        $items .= '<li><code style="font-size:1.1em">' . XH_hsc((string) $code) . '</code></li>';
+    }
+    $html = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        . '<meta name="robots" content="noindex"><title>Backup codes</title></head>'
+        . '<body style="font-family:sans-serif;max-width:36em;margin:3em auto;padding:0 1em">'
+        . '<h1>Backup codes</h1>'
+        . '<p>If you lose your phone, each of these codes works once in place of the app code. '
+        . 'Save them now (print them or write them down). They are not shown again.</p>'
+        . '<ol>' . $items . '</ol>'
+        . '<form method="post" action="' . XH_hsc((string) $_SERVER['REQUEST_URI']) . '">'
+        . '<input type="hidden" name="twofa_codes_saved" value="1">'
+        . '<button type="submit">I have saved them</button></form>'
+        . '</body></html>';
+    header('Content-Type: text/html; charset=UTF-8');
+    header('Cache-Control: no-store');
+    echo $html;
+    exit;
 }
 
 /**
@@ -152,9 +228,15 @@ function twofa_challenge(): void
         } else {
             $lastStep = $enrolling ? -1 : (int) ($data['last_step'] ?? -1);
             $step = twofa_verify($secret, $_POST['twofa_code'], $lastStep);
-            if ($step !== null) {
+            $usedBackup = $step === null && !$enrolling && twofa_use_backup_code($data, $_POST['twofa_code']);
+            if ($step !== null || $usedBackup) {
                 $data['secret'] = $secret;
-                $data['last_step'] = $step;
+                if ($step !== null) {
+                    $data['last_step'] = $step;
+                }
+                if ($enrolling) {
+                    $_SESSION['twofa_new_codes'] = twofa_make_backup_codes($data);
+                }
                 $data['fails'] = 0;
                 $data['locked_until'] = 0;
                 if (twofa_save($data)) {
@@ -196,11 +278,11 @@ function twofa_challenge(): void
             . '<p>Then enter the 6-digit code it shows to finish.</p>'
             . '<script>' . twofa_qr_script($otpauth) . '</script>';
     } else {
-        $html .= '<p>Enter the 6-digit code from Google Authenticator.</p>';
+        $html .= '<p>Enter the 6-digit code from Google Authenticator, or one of your backup codes.</p>';
     }
     $html .= '<form method="post" action="' . XH_hsc((string) $_SERVER['REQUEST_URI']) . '">'
-        . '<input type="text" name="twofa_code" inputmode="numeric" autocomplete="one-time-code"'
-        . ' pattern="[0-9 ]{6,7}" maxlength="7" required autofocus size="10"> '
+        . '<input type="text" name="twofa_code" autocomplete="one-time-code"'
+        . ' maxlength="11" required autofocus size="12"> '
         . '<button type="submit">Verify</button></form>'
         . '<p><a href="' . XH_hsc(CMSIMPLE_URL . '?&logout') . '">Log out</a></p>'
         . '</body></html>';
@@ -229,7 +311,13 @@ function twofa_run(): void
     if (isset($_POST['keycut'])) {
         unset($_SESSION['twofa_ok']);
     }
-    if (!XH_ADM || !empty($_SESSION['twofa_ok'])) {
+    if (!XH_ADM) {
+        return;
+    }
+    if (!empty($_SESSION['twofa_ok'])) {
+        if (!empty($_SESSION['twofa_new_codes'])) {
+            twofa_show_new_codes();
+        }
         return;
     }
     twofa_challenge();
