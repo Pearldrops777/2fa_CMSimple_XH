@@ -1,189 +1,166 @@
-2fa - Two-factor login (Google Authenticator) for CMSimple_XH
-=============================================================
+# 2fa — Two-Factor Login (Google Authenticator) for CMSimple_XH
 
-WHAT IT DOES
-------------
-After a correct CMSimple_XH admin password, the site asks for a 6-digit
-code from Google Authenticator before any admin page or action runs.
+After a correct CMSimple_XH admin password, the site asks for a 6-digit code from Google Authenticator before any admin page or action runs.
 
-- First login after installation: a QR code and a setup key are shown.
-  Scan the code in Google Authenticator (or type the key), then enter the
-  6-digit code to finish setup.
-- Every later password login asks for a fresh code.
-- Codes can be used only once. Five wrong codes lock the prompt for
-  15 minutes.
-- Backup codes: when setup finishes, 10 one-time backup codes are shown
-  once. Save them (print them or write them down). Each code works once
-  in place of the app code, for example if you lose your phone. A used
-  code is removed. Only the hashes of the codes are stored on the server.
-  The codes are not shown again, so if you lose them, delete
-  data/twofa.php and set up again (see TROUBLESHOOTING).
-- Visitors who are not logged in see no change.
+## What It Does
 
-The plugin does not change any CMSimple_XH core file, so CMSimple_XH
-updates do not remove it.
+- **First login after installation:** A QR code and a setup key are shown. Scan the code in Google Authenticator (or type the key), then enter the 6-digit code to finish setup.
+- **Every subsequent login:** Password login always requires a fresh 6-digit code.
+- **Replay & brute-force protection:** Codes can be used only once. Five wrong codes lock the prompt for 15 minutes.
+- **One-time backup codes:** When setup finishes, 10 one-time backup codes are shown once. Save them (print them or write them down). Each code works once in place of the app code—for example, if you lose your phone. A used code is immediately removed. Only the hashes of the codes are stored on the server.
+- **Backend management (`Plugins -> 2fa`):** View the remaining backup code count, generate a fresh set of 10 backup codes, or reset the 2FA secret key directly from the CMSimple_XH admin panel.
+- **Transparent to visitors:** Visitors who are not logged in see no change.
 
+The plugin does not modify any CMSimple_XH core files, so CMSimple_XH updates will not remove it.
 
-REQUIREMENTS
-------------
-- CMSimple_XH 1.8 (written against the 1.8 core files; not yet tested
-  on a live site)
-- PHP with the hash_hmac, random_bytes and intdiv functions (PHP 7.1 or newer)
-- Apache with mod_authz_core (or the older Order/Deny rules, which are
-  included as fallback). Nginx ignores .htaccess files, see "Nginx" below.
-- A phone with Google Authenticator (or another TOTP app such as
-  Aegis, FreeOTP or Microsoft Authenticator)
+## Requirements
 
+- **CMSimple_XH 1.8** (written against the 1.8 core files; test on a staging copy before deploying to a live site)
+- **PHP 7.1 or newer** with the `hash_hmac`, `random_bytes`, and `intdiv` functions enabled
+- **Apache** with `mod_authz_core` (or the older `Order`/`Deny` rules, which are included as a fallback). Nginx ignores `.htaccess` files—see the [Nginx](#nginx) section below.
+- A phone with **Google Authenticator** (or another RFC 6238 TOTP app such as Aegis, FreeOTP, or Microsoft Authenticator)
 
-FOLDER LAYOUT
--------------
-The plugin folder must be named exactly "2fa". The name starts with a
-digit on purpose: CMSimple_XH loads plugins in alphabetical order, so
-this plugin loads before the others.
+## Folder Layout
 
-  plugins/
-    2fa/
-      index.php              the plugin (required)
-      README.txt             this file (optional, can be removed)
-      js/
-        qrcode.js            QR code library, MIT license (required)
-        QRCODE-GENERATOR-LICENSE-README.md   license notice (keep it)
-      data/                  created by the server on first use
-        .htaccess            blocks web access (required)
-        twofa.php            TOTP secret, backup code hashes and rate-limit
-                             data (created automatically; never publish or
-                             copy it)
+The plugin folder must be named exactly `2fa`. The name starts with a digit on purpose: CMSimple_XH loads plugins in alphabetical order, so this plugin loads before other plugins.
 
+```text
+plugins/
+  2fa/
+    index.php                              # Login gate, TOTP & backup code verification (required)
+    admin.php                              # Backend panel under Plugins -> 2fa (required)
+    version.nfo                            # CMSimple_XH update checker metadata
+    README.md                              # Documentation (optional)
+    js/
+      qrcode.js                            # QR code library, MIT license (required)
+      QRCODE-GENERATOR-LICENSE-README.md   # License notice (keep it)
+    data/                                  # Created/populated by the server on first use
+      .htaccess                            # Blocks direct web access (required)
+      twofa.php                            # TOTP secret, backup code hashes & rate-limit state
+                                           # (created automatically; never publish or copy it)
+```
 
-INSTALLATION
-------------
-1. Download and unzip 2fa.zip. Copy the "2fa" folder to the CMSimple_XH backend's
-   plugins/ folder, so that you have the following file and directory structure:
-       plugins/2fa/index.php
-       plugins/2fa/js/qrcode.js and QRCODE-GENERATOR-LICENSE-README.md
-       plugins/2fa/data/.htaccess
-   Do not copy it to the Apache reverse proxy if the site uses one. The
-   plugin must run on the server that runs CMSimple_XH (PHP).
+## Installation
 
-2. Then give them the right owner and permissions (see PERMISSIONS below).
+1. Download and unzip `2fa.zip`. Copy the `2fa` folder into your CMSimple_XH `plugins/` directory so you have:
+   - `plugins/2fa/index.php`
+   - `plugins/2fa/admin.php`
+   - `plugins/2fa/version.nfo`
+   - `plugins/2fa/js/qrcode.js` and `QRCODE-GENERATOR-LICENSE-README.md`
+   - `plugins/2fa/data/.htaccess`
+   *(Do not copy it to an Apache reverse proxy if your site uses one. The plugin must run on the server executing CMSimple_XH PHP.)*
+2. Set the proper file ownership and permissions (see [Permissions](#permissions) below).
+3. Log in to CMSimple_XH with your admin password. The setup screen appears. Scan the QR code with Google Authenticator and enter the 6-digit code.
+4. Save the 10 one-time backup codes displayed on the following screen.
+5. **Test the setup:**
+   - Log out and log in again: the 2FA code prompt must appear.
+   - A wrong code must be refused.
+   - The same code must not work twice.
+   - Optional: verify that a backup code logs you in once and is then invalidated.
 
-3. Log in to CMSimple_XH with the admin password. The setup screen
-   appears. Scan the QR code with Google Authenticator, then enter the
-   6-digit code. The login completes after a correct code. Then save the
-   10 backup codes that appear on the next screen.
+> **Important:** Complete the first setup immediately after installing. Whoever logs in with the admin password first sets the 2FA key.
 
-4. Test the setup:
-   - log out and log in again: the code prompt must appear
-   - a wrong code must be refused
-   - the same code must not work twice
-   - optional: check that a backup code logs you in once and is then refused
+## Permissions
 
-Do the first setup right after installing. Whoever logs in with the
-password first sets the key.
+Replace `www-data` with the user that runs PHP on your server if different (check via `phpinfo()` or the owner of existing CMSimple_XH folders), and replace `/path/to/plugins` with your actual installation path.
 
+| Item | Owner | Mode |
+| :--- | :--- | :--- |
+| `plugins/2fa/` | deploy user or `www-data` | `755` |
+| `plugins/2fa/index.php`, `admin.php`, `version.nfo` | deploy user or `www-data` | `644` |
+| `plugins/2fa/js/` | deploy user or `www-data` | `755` |
+| `plugins/2fa/js/qrcode.js` | deploy user or `www-data` | `644` |
+| `plugins/2fa/data/` | `www-data` | `700` |
+| `plugins/2fa/data/.htaccess` | `www-data` | `644` |
+| `plugins/2fa/data/twofa.php` *(created by PHP)* | `www-data` | `600` |
 
-PERMISSIONS
------------
-Replace "www-data" with the user that runs PHP on your server if it is
-different (check with a phpinfo page, or with the owner of other
-CMSimple_XH folders). Replace /path/to with your installation path.
+Run as `root` or with `sudo`:
 
-  Item                                   Owner                 Mode
-  -------------------------------------  --------------------  ------
-  plugins/2fa/                           the deploy user or    755
-                                         www-data
-  plugins/2fa/index.php                  the deploy user or    644
-                                         www-data
-  plugins/2fa/js/                        the deploy user or    755
-  plugins/2fa/js/qrcode.js               the deploy user or    644
-  plugins/2fa/data/                      www-data              700
-  plugins/2fa/data/.htaccess             www-data              644
-  plugins/2fa/data/twofa.php             www-data              600
-                                         (created by PHP)
+```bash
+cd /path/to/plugins
+sudo chown -R www-data:www-data 2fa
+sudo find 2fa -type d -exec chmod 755 {} +
+sudo find 2fa -type f -exec chmod 644 {} +
+sudo chown www-data:www-data 2fa/data
+sudo chmod 700 2fa/data
 
-Commands (run as root or with sudo):
+# After the first successful setup:
+sudo chmod 600 2fa/data/twofa.php
+```
 
-  cd /path/to/plugins
-  sudo chown -R www-data:www-data 2fa
-  sudo find 2fa -type d -exec chmod 755 {} +
-  sudo find 2fa -type f -exec chmod 644 {} +
-  sudo chown www-data:www-data 2fa/data
-  sudo chmod 700 2fa/data
-  # after the first successful setup:
-  sudo chmod 600 2fa/data/twofa.php
+**Why:** PHP must be able to write to `data/` to save the secret and rate-limit state. Nothing outside `data/` requires write access. Never use `777`.
 
-Why: PHP must be able to write to data/ to save the secret. Nothing
-outside data/ needs write access. The data folder is not readable by
-other users, and twofa.php holds the secret. Do not use 777 (the
-server's existing 777 settings are a separate risk; see the notes
-below).
+## Managing & Resetting 2FA
 
+### Moving to a New Phone (Without Resetting)
+Google Authenticator supports account transfers (**Menu -> Transfer accounts -> Export accounts**). Scan the transfer QR code with your new phone to copy your existing entry without changing anything on the website.
 
-TROUBLESHOOTING
----------------
-"Could not save the two-factor data. Check that plugins/2fa/data is
-writable."
-  The code was accepted, but PHP cannot write data/twofa.php.
-  Check the owner and mode of plugins/2fa/data (see PERMISSIONS).
-  Check the Apache error log (/var/log/apache2/error.log or
-  /var/log/httpd/error_log) for a "Permission denied" line.
+### Regenerating Backup Codes or Resetting via Backend
+1. Log in to CMSimple_XH and go to **Plugins -> 2fa**.
+2. To replace your backup codes, enter a current 6-digit authenticator code under **Regenerate Backup Codes**.
+3. To pair a new device with a brand-new secret key, enter a current 6-digit code (or unused backup code) under **Reset 2FA Secret**. You will be immediately redirected to the setup screen to scan the new QR code and save 10 new backup codes. *(To use multiple devices, scan the same QR code on each device before confirming.)*
 
-The QR code area is empty, or shows "QR code not shown".
-  js/qrcode.js is missing or not readable by the web-server user.
-  Copy the js folder again and check its permissions.
+## Troubleshooting
 
-"Too many failed attempts"
-  Five wrong codes locked the prompt for 15 minutes. Wait, then try
-  again with the current code.
+- **"Could not save the two-factor data. Check that plugins/2fa/data is writable."**
+  The code was accepted, but PHP could not write `data/twofa.php`. Verify the owner and permissions of `plugins/2fa/data` (see [Permissions](#permissions)) and check your web server error log (`/var/log/apache2/error.log` or `/var/log/httpd/error_log`).
+- **The QR code area is empty or shows "QR code not shown"**
+  `js/qrcode.js` is missing or unreadable by the web-server user. Re-upload the `js/` folder and verify its `644` file permissions.
+- **"Too many failed attempts"**
+  Five wrong codes locked the prompt for 15 minutes. Wait 15 minutes and try again with a fresh code.
+- **The code is always refused**
+  Ensure your phone's clock is set to automatic network time synchronization. TOTP depends on accurate UTC time.
+- **A backup code is refused**
+  Each backup code works only once. Check that it has not been used previously (dashes and letter case are ignored). Failed backup code attempts count toward the same 5-attempt lockout.
+- **Locked out completely (lost phone, wrong key, and lost backup codes)**
+  Connect via FTP, SFTP, or SSH and delete:
+  ```text
+  plugins/2fa/data/twofa.php
+  ```
+  The next password login will restart setup with a fresh QR code and 10 new backup codes. Have your phone ready before deleting the file.
+- **Nothing happens; login succeeds without a code prompt**
+  Ensure the folder is named exactly `plugins/2fa/` and that `2fa` is not listed under `plugins/disabled` in CMSimple_XH's configuration.
 
-The code is always refused
-  Check that the phone's clock is set automatically (time sync). Codes
-  depend on the time, and a wrong clock causes refused codes.
+## Nginx
 
-A backup code is refused
-  Each backup code works once. Check that you typed it correctly (dashes
-  and capitals do not matter), and that it was not used before. Each
-  attempt counts toward the same five-attempt lock as an app code.
+Nginx ignores `.htaccess` files. If your server runs Nginx, block web access to the `data/` directory in your server block:
 
-Locked out for good (lost phone, wrong key, lost backup codes)
-  Delete the secret file over FTP or SSH:
-      plugins/2fa/data/twofa.php
-  The next password login starts setup again, with a new key and new
-  backup codes. Have the new phone ready before you delete the file.
+```nginx
+location ^~ /plugins/2fa/data/ {
+    deny all;
+}
+```
 
-Nothing happens, login works without a code
-  The plugin folder is missing, is named differently, or is disabled.
-  The folder must be exactly plugins/2fa/. Check that "2fa" is not in
-  the "plugins/disabled" setting in CMSimple_XH's configuration.
+## Security Notes
 
+- Keep the `data/` folder private. Anyone who can read `data/twofa.php` can generate valid login codes.
+- Never publish, copy, or screenshot `data/twofa.php`, your setup key, or your backup codes.
+- This plugin protects the admin login flow; it does not protect against an attacker who already has filesystem or server access.
+- Page-data saves run in the CMSimple_XH core before plugins load, so an attacker with only the admin password could still save page data prior to the 2FA prompt. Always use a strong, unique admin password.
+- Test on a copy of your site before deploying to production.
 
-NGINX
------
-Nginx ignores .htaccess files. If the server runs Nginx, block web
-access to the data folder in the server configuration instead:
+## License
 
-  location ^~ /plugins/2fa/data/ { deny all; }
+- The plugin code (`index.php`, `admin.php`) is provided as-is, without warranty.
+- `js/qrcode.js` is **qrcode-generator 1.5.2** by Kazuhiko Arase, licensed under the MIT License (see the file header and `js/QRCODE-GENERATOR-LICENSE-README.md`).
 
+## Changelog
 
-SECURITY NOTES
---------------
-- Keep the data folder private. Anyone who can read data/twofa.php can
-  generate the login codes.
-- Do not publish, copy or screenshot data/twofa.php, the setup key, or
-  your backup codes.
-- The plugin protects the admin login. It does not protect against
-  someone who gets access to the server.
-- Page-data saves run in the core before plugins load, so a person with
-  only the password could save page data before the code prompt. Keep
-  the admin password strong.
-- Test on a copy of the site before you use it on the live site.
+### 1.0.4
+- Added backend administration panel (`admin.php`) under **Plugins -> 2fa** to view remaining backup code count, regenerate backup codes, and reset the 2FA secret.
+- Added `version.nfo` for CMSimple_XH update checking.
 
+### 1.0.3
+- Added proper logout handling directly from the 2FA verification screen.
+- Regenerated session ID upon successful 2FA verification and logout to prevent session fixation.
+- Sanitized redirect URIs (`twofa_safe_uri()`) to prevent open redirects.
+- Added a short delay on failed code attempts to further slow down brute-force attacks.
 
-LICENSE
--------
-The plugin code (index.php) is provided as is, without warranty. Add
-your own license here if you distribute it.
+### 1.0.2
+- Added 10 one-time backup codes generated during initial 2FA setup.
 
-js/qrcode.js is qrcode-generator 1.5.2 by Kazuhiko Arase, under the
-MIT license. The license notice is in the file header and in
-js/QRCODE-GENERATOR-LICENSE-README.md.
+### 1.0.1
+- Updated installation instructions to include `sudo` for setting directory and file permissions.
+
+### 1.0.0
+- Initial release with TOTP (Google Authenticator) support and client-side QR code generation.
