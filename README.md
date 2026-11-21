@@ -12,6 +12,12 @@ code from Google Authenticator before any admin page or action runs.
 - Every later password login asks for a fresh code.
 - Codes can be used only once. Five wrong codes lock the prompt for
   15 minutes.
+- Backup codes: when setup finishes, 10 one-time backup codes are shown
+  once. Save them (print them or write them down). Each code works once
+  in place of the app code, for example if you lose your phone. A used
+  code is removed. Only the hashes of the codes are stored on the server.
+  The codes are not shown again, so if you lose them, delete
+  data/twofa.php and set up again (see TROUBLESHOOTING).
 - Visitors who are not logged in see no change.
 
 The plugin does not change any CMSimple_XH core file, so CMSimple_XH
@@ -44,8 +50,9 @@ this plugin loads before the others.
         QRCODE-GENERATOR-LICENSE-README.md   license notice (keep it)
       data/                  created by the server on first use
         .htaccess            blocks web access (required)
-        twofa.php            TOTP secret and rate-limit data (created
-                             automatically; never publish or copy it)
+        twofa.php            TOTP secret, backup code hashes and rate-limit
+                             data (created automatically; never publish or
+                             copy it)
 
 
 INSTALLATION
@@ -54,7 +61,7 @@ INSTALLATION
    plugins/ folder, so that you have the following file and directory structure:
        plugins/2fa/index.php
        plugins/2fa/js/qrcode.js and QRCODE-GENERATOR-LICENSE-README.md
-       plugins/2fa/data/.htaccess 
+       plugins/2fa/data/.htaccess
    Do not copy it to the Apache reverse proxy if the site uses one. The
    plugin must run on the server that runs CMSimple_XH (PHP).
 
@@ -62,12 +69,14 @@ INSTALLATION
 
 3. Log in to CMSimple_XH with the admin password. The setup screen
    appears. Scan the QR code with Google Authenticator, then enter the
-   6-digit code. The login completes after a correct code.
+   6-digit code. The login completes after a correct code. Then save the
+   10 backup codes that appear on the next screen.
 
 4. Test the setup:
    - log out and log in again: the code prompt must appear
    - a wrong code must be refused
    - the same code must not work twice
+   - optional: check that a backup code logs you in once and is then refused
 
 Do the first setup right after installing. Whoever logs in with the
 password first sets the key.
@@ -131,10 +140,16 @@ The code is always refused
   Check that the phone's clock is set automatically (time sync). Codes
   depend on the time, and a wrong clock causes refused codes.
 
-Locked out for good (lost phone, wrong key)
+A backup code is refused
+  Each backup code works once. Check that you typed it correctly (dashes
+  and capitals do not matter), and that it was not used before. Each
+  attempt counts toward the same five-attempt lock as an app code.
+
+Locked out for good (lost phone, wrong key, lost backup codes)
   Delete the secret file over FTP or SSH:
       plugins/2fa/data/twofa.php
-  The next password login starts setup again.
+  The next password login starts setup again, with a new key and new
+  backup codes. Have the new phone ready before you delete the file.
 
 Nothing happens, login works without a code
   The plugin folder is missing, is named differently, or is disabled.
@@ -154,7 +169,8 @@ SECURITY NOTES
 --------------
 - Keep the data folder private. Anyone who can read data/twofa.php can
   generate the login codes.
-- Do not publish, copy or screenshot data/twofa.php or the setup key.
+- Do not publish, copy or screenshot data/twofa.php, the setup key, or
+  your backup codes.
 - The plugin protects the admin login. It does not protect against
   someone who gets access to the server.
 - Page-data saves run in the core before plugins load, so a person with
