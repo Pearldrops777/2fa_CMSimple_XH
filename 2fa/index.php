@@ -41,6 +41,52 @@ function twofa_save(array $data): bool
     return file_put_contents(twofa_data_file(), $php, LOCK_EX) !== false;
 }
 
+/** Returns a safe relative URI (path + optional query) to prevent open redirects. */
+function twofa_safe_uri(): string
+{
+    $uri = (string) ($_SERVER['REQUEST_URI'] ?? '/');
+    $parts = parse_url($uri);
+    $path = $parts['path'] ?? '/';
+    if ($path === '' || $path[0] !== '/') {
+        $path = '/' . ltrim($path, '/');
+    }
+    return $path . (isset($parts['query']) ? '?' . $parts['query'] : '');
+}
+
+/**
+ * Returns a localized plugin string from $plugin_tx['2fa'], with English fallback.
+ */
+function twofa_tx(string $key, string $fallback): string
+{
+    global $plugin_tx;
+    if (isset($plugin_tx['2fa'][$key]) && is_string($plugin_tx['2fa'][$key]) && $plugin_tx['2fa'][$key] !== '') {
+        return $plugin_tx['2fa'][$key];
+    }
+    return $fallback;
+}
+
+/**
+ * Records a failed verification attempt and locks for 15 minutes after 5 fails.
+ *
+ * @param array<string, mixed> $data
+ */
+function twofa_record_failure(array &$data): void
+{
+    usleep(300000);
+    $data['fails'] = (int) ($data['fails'] ?? 0) + 1;
+    if ($data['fails'] >= 5) {
+        $data['fails'] = 0;
+        $data['locked_until'] = time() + 900;
+    }
+    twofa_save($data);
+}
+
+/** True while the failed-attempt lock is active. */
+function twofa_is_locked(array $data): bool
+{
+    return time() < (int) ($data['locked_until'] ?? 0);
+}
+
 function twofa_base32_decode(string $input): string
 {
     $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -112,22 +158,28 @@ function twofa_verify(string $secret, string $code, int $lastStep): ?int
 }
 
 /**
- * Returns JavaScript that draws the otpauth URI as a QR code in #twofa-qr.
- * The renderer (qrcode-generator, MIT) ships in js/qrcode.js and runs in the
- * browser, so the secret never goes to an outside service.
+ * Returns HTML tags that load js/qrcode.js externally and draw the otpauth URI
+ * inside #twofa-qr in the browser, so the secret never goes to an outside service.
  */
-function twofa_qr_script(string $otpauth): string
+function twofa_qr_tags(string $otpauth): string
 {
-    $lib = (string) @file_get_contents(__DIR__ . DIRECTORY_SEPARATOR . 'js' . DIRECTORY_SEPARATOR . 'qrcode.js');
-    if ($lib === '') {
-        return "document.getElementById('twofa-qr').textContent="
-            . "'QR code not shown: plugins/2fa/js/qrcode.js is missing or unreadable. Use the setup key below.';";
+    global $pth;
+    $jsFile = __DIR__ . DIRECTORY_SEPARATOR . 'js' . DIRECTORY_SEPARATOR . 'qrcode.js';
+    $missingMsg = json_encode(
+        twofa_tx('qr_missing', 'QR code not shown: plugins/2fa/js/qrcode.js is missing or unreadable. Use the setup key below.'),
+        JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+    );
+    if (!is_file($jsFile)) {
+        return '<script>document.getElementById("twofa-qr").textContent=' . $missingMsg . ';</script>';
     }
+    $basePlugins = isset($pth['folder']['plugins']) ? $pth['folder']['plugins'] : './plugins/';
+    $jsUrl = XH_hsc($basePlugins . '2fa/js/qrcode.js');
     $uri = json_encode($otpauth, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
-    $draw = "(function(){try{var q=qrcode(0,'M');q.addData(" . $uri . ");q.make();"
-        . "document.getElementById('twofa-qr').innerHTML=q.createSvgTag({scalable:true,margin:2});}"
-        . "catch(e){document.getElementById('twofa-qr').textContent='QR code error: '+e;}})();";
-    return $lib . "\n;" . $draw;
+    return '<script src="' . $jsUrl . '"></script>'
+        . '<script>(function(){try{if(typeof qrcode==="undefined"){throw "library not loaded";}'
+        . 'var q=qrcode(0,"M");q.addData(' . $uri . ');q.make();'
+        . 'document.getElementById("twofa-qr").innerHTML=q.createSvgTag({scalable:true,margin:2});}'
+        . 'catch(e){document.getElementById("twofa-qr").textContent=' . $missingMsg . ';}})();</script>';
 }
 
 /**
@@ -177,25 +229,33 @@ function twofa_use_backup_code(array &$data, string $input): bool
  */
 function twofa_show_new_codes(): void
 {
+    $safeUri = twofa_safe_uri();
+
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['twofa_codes_saved'])) {
         unset($_SESSION['twofa_new_codes']);
-        header('Location: ' . $_SERVER['REQUEST_URI'], true, 303);
+        header('Location: ' . $safeUri, true, 303);
         exit;
     }
     $items = '';
     foreach ($_SESSION['twofa_new_codes'] as $code) {
         $items .= '<li><code style="font-size:1.1em">' . XH_hsc((string) $code) . '</code></li>';
     }
-    $html = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
-        . '<meta name="robots" content="noindex"><title>Backup codes</title></head>'
+    $title = twofa_tx('backup_title', 'Backup codes');
+    $intro = twofa_tx(
+        'backup_intro',
+        'If you lose your phone, each of these codes works once in place of the app code. Save them now (print them or write them down). They are not shown again.'
+    );
+    $btn = twofa_tx('backup_saved_btn', 'I have saved them');
+
+    $html = '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        . '<meta name="robots" content="noindex"><title>' . XH_hsc($title) . '</title></head>'
         . '<body style="font-family:sans-serif;max-width:36em;margin:3em auto;padding:0 1em">'
-        . '<h1>Backup codes</h1>'
-        . '<p>If you lose your phone, each of these codes works once in place of the app code. '
-        . 'Save them now (print them or write them down). They are not shown again.</p>'
+        . '<h1>' . XH_hsc($title) . '</h1>'
+        . '<p>' . XH_hsc($intro) . '</p>'
         . '<ol>' . $items . '</ol>'
-        . '<form method="post" action="' . XH_hsc((string) $_SERVER['REQUEST_URI']) . '">'
+        . '<form method="post" action="' . XH_hsc($safeUri) . '">'
         . '<input type="hidden" name="twofa_codes_saved" value="1">'
-        . '<button type="submit">I have saved them</button></form>'
+        . '<button type="submit">' . XH_hsc($btn) . '</button></form>'
         . '</body></html>';
     header('Content-Type: text/html; charset=UTF-8');
     header('Cache-Control: no-store');
@@ -211,6 +271,7 @@ function twofa_challenge(): void
     $data = twofa_load();
     $enrolling = empty($data['secret']);
     $message = '';
+    $safeUri = twofa_safe_uri();
 
     if ($enrolling) {
         if (empty($_SESSION['twofa_pending'])) {
@@ -224,7 +285,7 @@ function twofa_challenge(): void
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['twofa_code']) && is_string($_POST['twofa_code'])) {
         $lockedUntil = (int) ($data['locked_until'] ?? 0);
         if (time() < $lockedUntil) {
-            $message = 'Too many failed attempts. Try again in a few minutes.';
+            $message = twofa_tx('err_locked', 'Too many failed attempts. Try again in a few minutes.');
         } else {
             $lastStep = $enrolling ? -1 : (int) ($data['last_step'] ?? -1);
             $step = twofa_verify($secret, $_POST['twofa_code'], $lastStep);
@@ -241,19 +302,18 @@ function twofa_challenge(): void
                 $data['locked_until'] = 0;
                 if (twofa_save($data)) {
                     unset($_SESSION['twofa_pending']);
+                    session_regenerate_id(true);
                     $_SESSION['twofa_ok'] = true;
-                    header('Location: ' . $_SERVER['REQUEST_URI'], true, 303);
+                    header('Location: ' . $safeUri, true, 303);
                     exit;
                 }
-                $message = 'Could not save the two-factor data. Check that plugins/2fa/data is writable.';
+                $message = twofa_tx(
+                    'err_save',
+                    'Could not save the two-factor data. Check that plugins/2fa/data is writable.'
+                );
             } else {
-                $data['fails'] = (int) ($data['fails'] ?? 0) + 1;
-                if ($data['fails'] >= 5) {
-                    $data['fails'] = 0;
-                    $data['locked_until'] = time() + 900;
-                }
-                twofa_save($data);
-                $message = 'The code is incorrect or was already used.';
+                twofa_record_failure($data);
+                $message = twofa_tx('err_invalid', 'The code is incorrect or was already used.');
             }
         }
     }
@@ -263,28 +323,50 @@ function twofa_challenge(): void
     $otpauth = 'otpauth://totp/' . $label . '?secret=' . $secret
         . '&issuer=' . rawurlencode($host) . '&algorithm=SHA1&digits=6&period=30';
 
-    $html = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
-        . '<meta name="robots" content="noindex"><title>Two-factor check</title></head>'
+    $pageTitle = twofa_tx('page_title', 'Two-factor check');
+    $heading = twofa_tx('heading', 'Two-factor authentication');
+
+    $html = '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        . '<meta name="robots" content="noindex"><title>' . XH_hsc($pageTitle) . '</title></head>'
         . '<body style="font-family:sans-serif;max-width:36em;margin:3em auto;padding:0 1em">'
-        . '<h1>Two-factor authentication</h1>';
+        . '<h1>' . XH_hsc($heading) . '</h1>';
     if ($message !== '') {
         $html .= '<p><b>' . XH_hsc($message) . '</b></p>';
     }
     if ($enrolling) {
-        $html .= '<p>Scan this QR code with Google Authenticator (tap + and choose &quot;Scan a QR code&quot;).</p>'
+        $scanText = twofa_tx(
+            'enroll_scan',
+            'Scan this QR code with Google Authenticator (tap + and choose "Scan a QR code").'
+        );
+        $manualText = twofa_tx(
+            'enroll_manual',
+            'Cannot scan? Choose "Enter a setup key" and type:'
+        );
+        $finishText = twofa_tx(
+            'enroll_finish',
+            'Then enter the 6-digit code it shows to finish.'
+        );
+        $html .= '<p>' . XH_hsc($scanText) . '</p>'
             . '<div id="twofa-qr" style="width:220px;height:220px"></div>'
-            . '<p>Cannot scan? Choose &quot;Enter a setup key&quot; and type: '
+            . '<p>' . XH_hsc($manualText) . ' '
             . '<code style="font-size:1.1em">' . XH_hsc(trim(chunk_split($secret, 4, ' '))) . '</code></p>'
-            . '<p>Then enter the 6-digit code it shows to finish.</p>'
-            . '<script>' . twofa_qr_script($otpauth) . '</script>';
+            . '<p>' . XH_hsc($finishText) . '</p>'
+            . twofa_qr_tags($otpauth);
     } else {
-        $html .= '<p>Enter the 6-digit code from Google Authenticator, or one of your backup codes.</p>';
+        $promptText = twofa_tx(
+            'prompt_enter',
+            'Enter the 6-digit code from Google Authenticator, or one of your backup codes.'
+        );
+        $html .= '<p>' . XH_hsc($promptText) . '</p>';
     }
-    $html .= '<form method="post" action="' . XH_hsc((string) $_SERVER['REQUEST_URI']) . '">'
+    $verifyBtn = twofa_tx('btn_verify', 'Verify');
+    $logoutLink = twofa_tx('link_logout', 'Log out');
+
+    $html .= '<form method="post" action="' . XH_hsc($safeUri) . '">'
         . '<input type="text" name="twofa_code" autocomplete="one-time-code"'
         . ' maxlength="11" required autofocus size="12"> '
-        . '<button type="submit">Verify</button></form>'
-        . '<p><a href="' . XH_hsc(CMSIMPLE_URL . '?&logout') . '">Log out</a></p>'
+        . '<button type="submit">' . XH_hsc($verifyBtn) . '</button></form>'
+        . '<p><a href="' . XH_hsc(CMSIMPLE_URL . '?&logout') . '">' . XH_hsc($logoutLink) . '</a></p>'
         . '</body></html>';
 
     header('Content-Type: text/html; charset=UTF-8');
@@ -299,17 +381,32 @@ function twofa_challenge(): void
  * - Anonymous visitors: no effect.
  * - A password POST (keycut) clears any earlier verification, so a new login
  *   always needs a fresh code.
+ * - A logout request ends the admin session here and redirects, so no admin
+ *   action can run in the same request.
  * - Logged-in admins without a verified code get the challenge instead of the
  *   backend. The challenge exits before any admin action runs.
  */
 function twofa_run(): void
 {
+    global $logout;
+
     if (!XH_ADM && !isset($_POST['keycut'])) {
         return;
     }
     XH_startSession();
+    $isLogout = !empty($logout) || isset($_GET['logout']);
     if (isset($_POST['keycut'])) {
-        unset($_SESSION['twofa_ok']);
+        unset($_SESSION['twofa_ok'], $_SESSION['twofa_pending'], $_SESSION['twofa_new_codes']);
+    }
+    if ($isLogout) {
+        if (XH_ADM) {
+            unset($_SESSION['xh_password'], $_SESSION['xh_user_agent'],
+                $_SESSION['twofa_ok'], $_SESSION['twofa_pending'], $_SESSION['twofa_new_codes']);
+            session_regenerate_id(true);
+            header('Location: ' . CMSIMPLE_URL, true, 303);
+            exit;
+        }
+        return;
     }
     if (!XH_ADM) {
         return;
