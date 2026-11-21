@@ -50,7 +50,7 @@ this plugin loads before the others.
 
 INSTALLATION
 ------------
-1. Unzip the 2fa.zip and copy the "2fa" folder to the CMSimple_XH backend's
+1. Download and unzip 2fa.zip. Copy the "2fa" folder to the CMSimple_XH backend's
    plugins/ folder, so that you have the following file and directory structure:
        plugins/2fa/index.php
        plugins/2fa/js/qrcode.js and QRCODE-GENERATOR-LICENSE-README.md
