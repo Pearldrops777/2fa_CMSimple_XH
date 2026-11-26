@@ -3,7 +3,8 @@
  * CMSimple_XH plugin "2fa": TOTP (Google Authenticator) second factor for the admin login.
  *
  * After the password login succeeds, the backend shows a code prompt before any
- * admin page or action runs. First use shows an enrollment screen with the key.
+ * admin page or action runs. Setup is done only in the backend (Plugins -> 2fa):
+ * until it is complete, the admin goes straight to that page to enroll.
  *
  * Folder name starts with "2" so this plugin loads before other plugins.
  */
@@ -125,6 +126,15 @@ function twofa_new_secret(): string
     return twofa_base32_encode(random_bytes(20));
 }
 
+/** otpauth:// URI for the authenticator app (QR code content). */
+function twofa_otpauth(string $secret): string
+{
+    $host = (string) ($_SERVER['HTTP_HOST'] ?? 'CMSimple');
+    $label = rawurlencode('CMSimple admin @ ' . $host);
+    return 'otpauth://totp/' . $label . '?secret=' . $secret
+        . '&issuer=' . rawurlencode($host) . '&algorithm=SHA1&digits=6&period=30';
+}
+
 /** RFC 6238 TOTP: HMAC-SHA1, 30-second step, 6 digits. */
 function twofa_totp(string $secret, int $step): string
 {
@@ -225,83 +235,29 @@ function twofa_use_backup_code(array &$data, string $input): bool
 }
 
 /**
- * Shows the backup codes once, right after setup. Exits.
- */
-function twofa_show_new_codes(): void
-{
-    $safeUri = twofa_safe_uri();
-
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['twofa_codes_saved'])) {
-        unset($_SESSION['twofa_new_codes']);
-        header('Location: ' . $safeUri, true, 303);
-        exit;
-    }
-    $items = '';
-    foreach ($_SESSION['twofa_new_codes'] as $code) {
-        $items .= '<li><code style="font-size:1.1em">' . XH_hsc((string) $code) . '</code></li>';
-    }
-    $title = twofa_tx('backup_title', 'Backup codes');
-    $intro = twofa_tx(
-        'backup_intro',
-        'If you lose your phone, each of these codes works once in place of the app code. Save them now (print them or write them down). They are not shown again.'
-    );
-    $btn = twofa_tx('backup_saved_btn', 'I have saved them');
-
-    $html = '<!DOCTYPE html><html><head><meta charset="utf-8">'
-        . '<meta name="robots" content="noindex"><title>' . XH_hsc($title) . '</title></head>'
-        . '<body style="font-family:sans-serif;max-width:36em;margin:3em auto;padding:0 1em">'
-        . '<h1>' . XH_hsc($title) . '</h1>'
-        . '<p>' . XH_hsc($intro) . '</p>'
-        . '<ol>' . $items . '</ol>'
-        . '<form method="post" action="' . XH_hsc($safeUri) . '">'
-        . '<input type="hidden" name="twofa_codes_saved" value="1">'
-        . '<button type="submit">' . XH_hsc($btn) . '</button></form>'
-        . '</body></html>';
-    header('Content-Type: text/html; charset=UTF-8');
-    header('Cache-Control: no-store');
-    echo $html;
-    exit;
-}
-
-/**
- * Renders the code prompt (or enrollment screen) and exits.
+ * Renders the code prompt and exits. Only used once setup is complete.
  */
 function twofa_challenge(): void
 {
     $data = twofa_load();
-    $enrolling = empty($data['secret']);
+    $secret = (string) ($data['secret'] ?? '');
     $message = '';
     $safeUri = twofa_safe_uri();
 
-    if ($enrolling) {
-        if (empty($_SESSION['twofa_pending'])) {
-            $_SESSION['twofa_pending'] = twofa_new_secret();
-        }
-        $secret = (string) $_SESSION['twofa_pending'];
-    } else {
-        $secret = (string) $data['secret'];
-    }
-
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['twofa_code']) && is_string($_POST['twofa_code'])) {
-        $lockedUntil = (int) ($data['locked_until'] ?? 0);
-        if (time() < $lockedUntil) {
+        if (twofa_is_locked($data)) {
             $message = twofa_tx('err_locked', 'Too many failed attempts. Try again in a few minutes.');
         } else {
-            $lastStep = $enrolling ? -1 : (int) ($data['last_step'] ?? -1);
+            $lastStep = (int) ($data['last_step'] ?? -1);
             $step = twofa_verify($secret, $_POST['twofa_code'], $lastStep);
-            $usedBackup = $step === null && !$enrolling && twofa_use_backup_code($data, $_POST['twofa_code']);
+            $usedBackup = $step === null && twofa_use_backup_code($data, $_POST['twofa_code']);
             if ($step !== null || $usedBackup) {
-                $data['secret'] = $secret;
                 if ($step !== null) {
                     $data['last_step'] = $step;
-                }
-                if ($enrolling) {
-                    $_SESSION['twofa_new_codes'] = twofa_make_backup_codes($data);
                 }
                 $data['fails'] = 0;
                 $data['locked_until'] = 0;
                 if (twofa_save($data)) {
-                    unset($_SESSION['twofa_pending']);
                     session_regenerate_id(true);
                     $_SESSION['twofa_ok'] = true;
                     header('Location: ' . $safeUri, true, 303);
@@ -318,11 +274,6 @@ function twofa_challenge(): void
         }
     }
 
-    $host = (string) ($_SERVER['HTTP_HOST'] ?? 'CMSimple');
-    $label = rawurlencode('CMSimple admin @ ' . $host);
-    $otpauth = 'otpauth://totp/' . $label . '?secret=' . $secret
-        . '&issuer=' . rawurlencode($host) . '&algorithm=SHA1&digits=6&period=30';
-
     $pageTitle = twofa_tx('page_title', 'Two-factor check');
     $heading = twofa_tx('heading', 'Two-factor authentication');
 
@@ -333,36 +284,15 @@ function twofa_challenge(): void
     if ($message !== '') {
         $html .= '<p><b>' . XH_hsc($message) . '</b></p>';
     }
-    if ($enrolling) {
-        $scanText = twofa_tx(
-            'enroll_scan',
-            'Scan this QR code with Google Authenticator (tap + and choose "Scan a QR code").'
-        );
-        $manualText = twofa_tx(
-            'enroll_manual',
-            'Cannot scan? Choose "Enter a setup key" and type:'
-        );
-        $finishText = twofa_tx(
-            'enroll_finish',
-            'Then enter the 6-digit code it shows to finish.'
-        );
-        $html .= '<p>' . XH_hsc($scanText) . '</p>'
-            . '<div id="twofa-qr" style="width:220px;height:220px"></div>'
-            . '<p>' . XH_hsc($manualText) . ' '
-            . '<code style="font-size:1.1em">' . XH_hsc(trim(chunk_split($secret, 4, ' '))) . '</code></p>'
-            . '<p>' . XH_hsc($finishText) . '</p>'
-            . twofa_qr_tags($otpauth);
-    } else {
-        $promptText = twofa_tx(
-            'prompt_enter',
-            'Enter the 6-digit code from Google Authenticator, or one of your backup codes.'
-        );
-        $html .= '<p>' . XH_hsc($promptText) . '</p>';
-    }
+    $promptText = twofa_tx(
+        'prompt_enter',
+        'Enter the 6-digit code from Google Authenticator, or one of your backup codes.'
+    );
     $verifyBtn = twofa_tx('btn_verify', 'Verify');
     $logoutLink = twofa_tx('link_logout', 'Log out');
 
-    $html .= '<form method="post" action="' . XH_hsc($safeUri) . '">'
+    $html .= '<p>' . XH_hsc($promptText) . '</p>'
+        . '<form method="post" action="' . XH_hsc($safeUri) . '">'
         . '<input type="text" name="twofa_code" autocomplete="one-time-code"'
         . ' maxlength="11" required autofocus size="12"> '
         . '<button type="submit">' . XH_hsc($verifyBtn) . '</button></form>'
@@ -383,8 +313,10 @@ function twofa_challenge(): void
  *   always needs a fresh code.
  * - A logout request ends the admin session here and redirects, so no admin
  *   action can run in the same request.
- * - Logged-in admins without a verified code get the challenge instead of the
- *   backend. The challenge exits before any admin action runs.
+ * - Admins who have not finished setup go straight to the backend (Plugins -> 2fa),
+ *   where enrollment happens. No code is asked until setup is complete.
+ * - Logged-in admins without a verified code get the code prompt instead of the
+ *   backend. The prompt exits before any admin action runs.
  */
 function twofa_run(): void
 {
@@ -396,7 +328,7 @@ function twofa_run(): void
     XH_startSession();
     $isLogout = !empty($logout) || isset($_GET['logout']);
     if (isset($_POST['keycut'])) {
-        unset($_SESSION['twofa_ok'], $_SESSION['twofa_pending'], $_SESSION['twofa_new_codes']);
+        unset($_SESSION['twofa_ok'], $_SESSION['twofa_pending']);
     }
     if ($isLogout) {
         if (XH_ADM) {
@@ -408,13 +340,12 @@ function twofa_run(): void
         }
         return;
     }
-    if (!XH_ADM) {
+    if (!XH_ADM || !empty($_SESSION['twofa_ok'])) {
         return;
     }
-    if (!empty($_SESSION['twofa_ok'])) {
-        if (!empty($_SESSION['twofa_new_codes'])) {
-            twofa_show_new_codes();
-        }
+    // Setup not finished yet: no code is asked, so the admin can reach Plugins -> 2fa.
+    $data = twofa_load();
+    if (empty($data['secret'])) {
         return;
     }
     twofa_challenge();
